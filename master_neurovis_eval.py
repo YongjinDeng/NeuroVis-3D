@@ -1,7 +1,7 @@
 """
-====================================================================
-NeuroVis-3D
-====================================================================
+NeuroVis-3D: 终极定稿评估套件 (The Ultimate Evaluation Suite)
+包含: 动态路由证据融合 + 单侧 DeLong 显著性检验 + 复杂度分析
+完全契合 IEEE JBHI / TMI 顶刊论文描述
 """
 
 import os
@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
 import scipy.stats as st
 import medmnist
 from medmnist import INFO
@@ -22,6 +21,7 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
+# ==================== 目录与全局配置 ====================
 RESULTS_DIR = r'D:\0临床科研\生物视觉图网络用于分类\NeuroRes_Results_Ultimate'
 WEIGHTS_DIR = os.path.join(RESULTS_DIR, 'weights')
 FIGURES_DIR = os.path.join(RESULTS_DIR, 'figures')
@@ -29,6 +29,7 @@ os.makedirs(WEIGHTS_DIR, exist_ok=True)
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 def set_seed(seed=42):
+    """固定随机种子，确保实验完全可复现"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -36,7 +37,6 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
 set_seed(42)
 
 # ==================== 1. 网络架构定义 ====================
@@ -50,6 +50,7 @@ class ResBlock3D(nn.Module):
         self.shortcut = nn.Sequential()
         if stride != 1 or in_c != out_c:
             self.shortcut = nn.Sequential(nn.Conv3d(in_c, out_c, 1, stride=stride, bias=False), nn.BatchNorm3d(out_c))
+            
     def forward(self, x): 
         return F.relu(self.bn2(self.conv2(F.relu(self.bn1(self.conv1(x))))) + self.shortcut(x))
 
@@ -62,6 +63,7 @@ class VanillaResNet3D(nn.Module):
         self.layer3 = ResBlock3D(32, 64, 2)
         self.pool = nn.AdaptiveAvgPool3d(1)
         self.fc = nn.Linear(64, num_classes)
+        
     def forward(self, x):
         return self.fc(self.pool(self.layer3(self.layer2(self.layer1(self.stem(x))))).view(x.size(0), -1))
 
@@ -109,9 +111,21 @@ def edl_loss(evidence, target, num_classes, epoch_num, max_epochs=60):
     loss_kl = annealing * torch.sum(torch.lgamma(kl_alpha) - torch.lgamma(torch.ones_like(kl_alpha)), dim=1, keepdim=True)
     return torch.mean(loss_ce + 0.01 * loss_kl)
 
-# ==================== 2. DeLong 统计检验 ====================
+# ==================== 2. 核心评估工具 ====================
+def measure_complexity(model, device):
+    params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
+    dummy = torch.randn(1, 1, 28, 28, 28).to(device)
+    model.eval()
+    with torch.no_grad():
+        for _ in range(5): model(dummy)
+        start = time.time()
+        for _ in range(50): model(dummy)
+        inf_time = (time.time() - start) / 50 * 1000
+    return params, inf_time
+
 def delong_auc_test(y_true, y_pred_baseline, y_pred_ours):
-    if len(np.unique(y_true)) > 2: return "N/A"
+    """精确单侧 DeLong AUC 显著性检验"""
+    if len(np.unique(y_true)) > 2: return 1.0
     def compute_midrank(x):
         J = np.argsort(x)
         Z = x[J]
@@ -128,7 +142,6 @@ def delong_auc_test(y_true, y_pred_baseline, y_pred_ours):
         return T2
     preds = np.vstack((y_pred_baseline, y_pred_ours))
     m, n = np.sum(y_true == 1), np.sum(y_true == 0)
-    if m == 0 or n == 0: return "N/A"
     tx = np.apply_along_axis(compute_midrank, 1, preds[:, y_true == 1])
     ty = np.apply_along_axis(compute_midrank, 1, preds[:, y_true == 0])
     tz = np.apply_along_axis(compute_midrank, 1, preds)
@@ -139,110 +152,54 @@ def delong_auc_test(y_true, y_pred_baseline, y_pred_ours):
     delongcov = sx / m + sy / n
     diff = aucs[1] - aucs[0]
     var = delongcov[0, 0] + delongcov[1, 1] - 2 * delongcov[0, 1]
-    if var <= 0: return "N/A"
+    if var <= 0: return 1.0
     z = diff / np.sqrt(var)
-    p_val = 1 - st.norm.cdf(z)
-    return f"{p_val:.4f}"
+    return 1 - st.norm.cdf(z)
 
-# ==================== 3. 辅助评估与绘图 ====================
-def measure_complexity(model, device):
-    params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
-    dummy = torch.randn(1, 1, 28, 28, 28).to(device)
-    model.eval()
-    with torch.no_grad():
-        for _ in range(5): model(dummy)
-        if torch.cuda.is_available(): torch.cuda.synchronize()
-        start = time.time()
-        for _ in range(50): model(dummy)
-        if torch.cuda.is_available(): torch.cuda.synchronize()
-        inf_time = (time.time() - start) / 50 * 1000
-    return params, inf_time
-
-def plot_training_curves(history, dataset_name):
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    epochs = history['epoch']
-    axes[0].plot(epochs, history['base_loss'], label='ResNet Loss', lw=2)
-    axes[0].plot(epochs, history['our_loss'], label='NeuroVis Loss', lw=2, c='#E74C3C')
-    axes[0].set_title('Training Loss'); axes[0].legend(); axes[0].grid(ls='--', alpha=0.5)
-    
-    if len(history['base_auc']) == len(epochs):
-        axes[1].plot(epochs, history['base_auc'], label='ResNet Val AUC', lw=2)
-    axes[1].plot(epochs, history['our_auc_f'], label='Fusion Val AUC', lw=2, c='#E74C3C')
-    axes[1].plot(epochs, history['our_auc_m'], label='M-Expert Val AUC', ls='--', lw=1.5, c='#2ECC71')
-    axes[1].plot(epochs, history['our_auc_p'], label='P-Expert Val AUC', ls='--', lw=1.5, c='#F39C12')
-    axes[1].set_title('Validation AUC'); axes[1].legend(); axes[1].grid(ls='--', alpha=0.5)
-    
-    if len(history['gate_m']) == len(epochs):
-        axes[2].plot(epochs, history['gate_m'], label='M-Pathway Belief', lw=2, c='#2ECC71')
-        axes[2].plot(epochs, history['gate_p'], label='P-Pathway Belief', lw=2, c='#F39C12')
-        axes[2].set_title('Evidence Quality'); axes[2].legend(); axes[2].grid(ls='--', alpha=0.5)
-    plt.tight_layout()
-    plt.savefig(os.path.join(FIGURES_DIR, f'{dataset_name}_curves.png'), dpi=300)
-    plt.close()
-
-def save_failure_cases(all_labels, all_probs, all_idxs, dataset_name, num_classes):
-    if num_classes > 2: return
-    preds = (all_probs >= 0.5).astype(int)
-    errors = (preds != all_labels)
-    if np.sum(errors) == 0: return
-    err_probs, err_labels, err_idxs = all_probs[errors], all_labels[errors], all_idxs[errors]
-    confidence = np.abs(err_probs - 0.5) * 2
-    worst_indices = np.argsort(confidence)[-min(10, len(confidence)):][::-1]
-    failures = []
-    for i in worst_indices:
-        failures.append({'Sample_IDX': int(err_idxs[i]), 'True_Label': int(err_labels[i]), 'Predicted_Prob': float(err_probs[i]), 'Confidence': float(confidence[i])})
-    pd.DataFrame(failures).to_csv(os.path.join(FIGURES_DIR, f'{dataset_name}_failures.csv'), index=False)
-
+# ==================== 3. 训练与验证引擎 ====================
 class MedMNIST3DDataset(torch.utils.data.Dataset):
-    def __init__(self, data_class, split='train'): self.dataset = data_class(split=split, download=True)
-    def __len__(self): return len(self.dataset)
+    def __init__(self, data_class, split='train'): 
+        self.dataset = data_class(split=split, download=True)
+    def __len__(self): 
+        return len(self.dataset)
     def __getitem__(self, idx):
         img, label = self.dataset[idx]
         img = torch.tensor(img, dtype=torch.float32) / 255.0
-        return img.unsqueeze(0) if img.dim()==3 else img, int(label[0]), idx
+        return img.unsqueeze(0) if img.dim()==3 else img, int(label[0])
 
 def evaluate(model, loader, device, num_classes, is_neuro=False):
     model.eval()
-    all_probs_f, all_probs_m, all_probs_p, all_labels, all_idxs = [], [], [], [], []
-    avg_bm, avg_bp = [], []
+    all_probs_f, all_probs_m, all_probs_p, all_labels = [], [], [], []
     with torch.no_grad():
-        for imgs, labels, idxs in loader:
+        for imgs, labels in loader:
             imgs = imgs.to(device)
             if is_neuro:
-                e_f, e_m, e_p, _, _, b_m, b_p = model(imgs)
+                e_f, e_m, e_p, _, _, _, _ = model(imgs)
                 all_probs_f.append(((e_f+1)/torch.sum(e_f+1, dim=1, keepdim=True)).cpu().numpy())
                 all_probs_m.append(((e_m+1)/torch.sum(e_m+1, dim=1, keepdim=True)).cpu().numpy())
                 all_probs_p.append(((e_p+1)/torch.sum(e_p+1, dim=1, keepdim=True)).cpu().numpy())
-                avg_bm.append(b_m.cpu().numpy())
-                avg_bp.append(b_p.cpu().numpy())
             else:
                 all_probs_f.append(torch.softmax(model(imgs), dim=1).cpu().numpy())
             all_labels.append(labels.numpy())
-            all_idxs.append(idxs.numpy())
 
-    all_labels = np.concatenate(all_labels, axis=0).flatten()
+    all_labels = np.concatenate(all_labels, axis=0)
     all_probs_f = np.concatenate(all_probs_f, axis=0)
-    all_idxs = np.concatenate(all_idxs, axis=0).flatten()
-    
-    ret_bm = np.mean(np.concatenate(avg_bm)) if is_neuro else 0.0
-    ret_bp = np.mean(np.concatenate(avg_bp)) if is_neuro else 0.0
     
     if num_classes == 2:
         auc_f = roc_auc_score(all_labels, all_probs_f[:, 1])
         if is_neuro:
             auc_m = roc_auc_score(all_labels, np.concatenate(all_probs_m, axis=0)[:, 1])
             auc_p = roc_auc_score(all_labels, np.concatenate(all_probs_p, axis=0)[:, 1])
-            return auc_f, auc_m, auc_p, all_probs_f[:, 1], all_labels, all_idxs, ret_bm, ret_bp 
-        return auc_f, all_probs_f[:, 1], all_labels, all_idxs 
+            return auc_f, auc_m, auc_p, all_probs_f[:, 1], all_labels
+        return auc_f, all_probs_f[:, 1], all_labels
     else:
         auc_f = roc_auc_score(all_labels, all_probs_f, multi_class='ovr')
         if is_neuro:
             auc_m = roc_auc_score(all_labels, np.concatenate(all_probs_m, axis=0), multi_class='ovr')
             auc_p = roc_auc_score(all_labels, np.concatenate(all_probs_p, axis=0), multi_class='ovr')
-            return auc_f, auc_m, auc_p, all_probs_f, all_labels, all_idxs, ret_bm, ret_bp 
-        return auc_f, all_probs_f, all_labels, all_idxs 
+            return auc_f, auc_m, auc_p, all_probs_f, all_labels
+        return auc_f, all_probs_f, all_labels
 
-# ==================== 4. 训练与验证引擎 ====================
 def train_and_evaluate(dataset_name, epochs=60, batch_size=32):
     print(f"\n{'='*70}\n🚀 执行定稿评估: {dataset_name.upper()}\n{'='*70}")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -250,50 +207,35 @@ def train_and_evaluate(dataset_name, epochs=60, batch_size=32):
     num_classes = len(INFO[dataset_name]['label'])
     
     train_loader = DataLoader(MedMNIST3DDataset(DataClass, 'train'), batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(MedMNIST3DDataset(DataClass, 'val'), batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(MedMNIST3DDataset(DataClass, 'test'), batch_size=batch_size, shuffle=False)
     
-    history = {'epoch': [], 'base_loss': [], 'base_auc': [], 
-               'our_loss': [], 'our_auc_f': [], 'our_auc_m': [], 'our_auc_p': [], 
-               'gate_m': [], 'gate_p': []}
-    
-    # ---------- 1. 训练 Baseline (🚨 关键：纯粹连续训练 60 轮，中途不打断切换 eval) ----------
-    print("⏳ [1/3] 训练 3D-ResNet Baseline (Conventional Protocol - Pure Uninterrupted)...")
+    # ---------- 1. 训练 Baseline (Conventional Protocol) ----------
+    print("⏳ [1/3] 训练 3D-ResNet Baseline (Conventional Protocol)...")
     base_model = VanillaResNet3D(num_classes).to(device)
     base_params, base_time = measure_complexity(base_model, device)
     opt_base = torch.optim.AdamW(base_model.parameters(), lr=1e-3, weight_decay=1e-2)
     
     for epoch in tqdm(range(1, epochs + 1), desc="  Base Training", leave=False):
         base_model.train()
-        tot_loss = 0
-        for imgs, labels, _ in train_loader:
-            imgs, labels = imgs.to(device), labels.to(device).long()
+        for imgs, labels in train_loader:
             opt_base.zero_grad()
-            loss = nn.CrossEntropyLoss()(base_model(imgs), labels)
-            loss.backward(); opt_base.step()
-            tot_loss += loss.item()
+            loss = nn.CrossEntropyLoss()(base_model(imgs.to(device)), labels.to(device).long())
+            loss.backward()
+            opt_base.step()
             
-        history['base_loss'].append(tot_loss / len(train_loader))
-        # 🚨 关键修复：不在循环内部调用 evaluate(val_loader)，彻底保护 Baseline 的 BatchNorm 状态！
-    
-    # 60 轮跑完后直接测 Test 集中 (精准重现 0.8538)
-    base_test_auc, base_probs, test_labels, test_idxs = evaluate(base_model, test_loader, device, num_classes, is_neuro=False)
+    base_test_auc, base_probs, test_labels = evaluate(base_model, test_loader, device, num_classes, is_neuro=False)
     print(f"✅ Baseline Test AUC: {base_test_auc:.4f}")
 
-    # ---------- 2. 训练 NeuroVis-3D (有 Cosine 调度器，有验证集早停) ----------
-    print("\n⏳ [2/3] 训练 NeuroVis-3D (Evidential Protocol - With Scheduler & Early Stopping)...")
+    # ---------- 2. 训练 NeuroVis-3D (Evidential Protocol) ----------
+    print("\n⏳ [2/3] 训练 NeuroVis-3D (Evidential Protocol)...")
     our_model = NeuroVis3D_Evidential(num_classes).to(device)
     our_params, our_time = measure_complexity(our_model, device)
     opt_our = torch.optim.AdamW(our_model.parameters(), lr=1e-3, weight_decay=1e-2)
     sch_our = torch.optim.lr_scheduler.CosineAnnealingLR(opt_our, T_max=epochs)
     
-    best_our_auc = 0.0
-    save_path = os.path.join(WEIGHTS_DIR, f'dst_{dataset_name}.pth')
-    
     for epoch in tqdm(range(1, epochs + 1), desc="  Ours Training", leave=False):
         our_model.train()
-        tot_loss = 0
-        for imgs, labels, _ in train_loader:
+        for imgs, labels in train_loader:
             imgs, labels = imgs.to(device), labels.to(device)
             opt_our.zero_grad()
             e_f, e_m, e_p, f_m, f_p, _, _ = our_model(imgs)
@@ -301,63 +243,49 @@ def train_and_evaluate(dataset_name, epochs=60, batch_size=32):
             loss_m = edl_loss(e_m, labels, num_classes, epoch, epochs)
             loss_p = edl_loss(e_p, labels, num_classes, epoch, epochs)
             loss_ortho = torch.mean(torch.abs(F.cosine_similarity(f_m, f_p, dim=1)))
-            
-            # 还原 code1.txt 原始超参数权重
             loss = loss_f + 0.5 * loss_m + 0.5 * loss_p + 0.1 * loss_ortho
-            
             loss.backward()
             torch.nn.utils.clip_grad_norm_(our_model.parameters(), 1.0)
             opt_our.step()
-            tot_loss += loss.item()
         sch_our.step()
-        
-        auc_f, auc_m, auc_p, _, _, _, b_m, b_p = evaluate(our_model, val_loader, device, num_classes, is_neuro=True)
-        
-        if auc_f > best_our_auc:
-            best_our_auc = auc_f
-            torch.save(our_model.state_dict(), save_path)
-        
-        history['epoch'].append(epoch)
-        history['our_loss'].append(tot_loss / len(train_loader))
-        history['our_auc_f'].append(auc_f)
-        history['our_auc_m'].append(auc_m)
-        history['our_auc_p'].append(auc_p)
-        history['gate_m'].append(b_m)
-        history['gate_p'].append(b_p)
-    
-    if os.path.exists(save_path):
-        our_model.load_state_dict(torch.load(save_path))
-    test_f, test_m, test_p, our_probs, _, _, _, _ = evaluate(our_model, test_loader, device, num_classes, is_neuro=True)
+
+    # 仅保存单一权威权重文件 dst_{dataset_name}.pth
+    save_path = os.path.join(WEIGHTS_DIR, f'dst_{dataset_name}.pth')
+    torch.save(our_model.state_dict(), save_path)
+    print(f"💾 仅保存单一权威模型权重至: {save_path}")
+
+    test_f, test_m, test_p, our_probs, _ = evaluate(our_model, test_loader, device, num_classes, is_neuro=True)
     print(f"✅ NeuroVis-3D Test AUC: {test_f:.4f} (M: {test_m:.4f} | P: {test_p:.4f})")
     
-    # ---------- 3. DeLong 检验 ----------
+    # ---------- 3. 单侧 DeLong 显著性检验 ----------
     print("\n⏳ [3/3] 计算 DeLong 统计显著性...")
-    p_val = delong_auc_test(test_labels, base_probs, our_probs) if num_classes == 2 else "N/A"
-    
-    if p_val != "N/A":
-        p_float = float(p_val)
-        final_p_str = "< 0.001" if p_float < 0.001 else f"{p_float:.4f}"
-        flag = "🎉 Significant!" if p_float < 0.05 else "⚠️ Not Significant"
-        print(f"   DeLong p-value: {final_p_str} ({flag})")
+    if num_classes == 2:
+        p_delong = delong_auc_test(test_labels, base_probs, our_probs)
+        if p_delong < 0.001:
+            final_p_str = "< 0.001"
+        else:
+            final_p_str = f"{p_delong:.4f}"
+        print(f"   DeLong p-value: {final_p_str}")
     else:
         final_p_str = "N/A"
-    
-    plot_training_curves(history, dataset_name)
-    if num_classes == 2:
-        save_failure_cases(test_labels, our_probs, test_idxs, dataset_name, num_classes)
-    
+        
     return {
-        'Dataset': dataset_name, 'Base': base_test_auc, 'Ours': test_f,
-        'M': test_m, 'P': test_p, 'PVal': final_p_str,
+        'Dataset': dataset_name,
+        'Base': base_test_auc,
+        'Ours': test_f,
+        'M': test_m,
+        'P': test_p,
+        'PVal': final_p_str,
         'Params': f"{base_params:.1f}M / {our_params:.1f}M",
         'Time': f"{base_time:.1f}ms / {our_time:.1f}ms"
     }
 
 # ==========================================
-# 5. 主程序
+# 4. 主程序
 # ==========================================
 def main():
     print("="*100)
+    print("🏆 NeuroVis-3D 终极定稿程序 (仅保留 DeLong 检验 & 单一权威权重保存)")
     print("="*100)
     
     datasets = ['nodulemnist3d', 'organmnist3d', 'fracturemnist3d', 'vesselmnist3d']
@@ -366,13 +294,13 @@ def main():
     print("\n\n" + "★"*115)
     print("📋 TABLE I: COMPREHENSIVE PERFORMANCE & STATISTICAL SIGNIFICANCE")
     print("★"*115)
-    print(f"| {'Dataset':<16} | {'ResNet':<8} | {'M-Net':<8} | {'P-Net':<8} | {'Ours(Fusion)':<12} | {'DeLong p':<10} | {'Params(B/O)':<15} | {'Time(B/O)':<15} |")
-    print(f"|{'-'*18}|{'-'*10}|{'-'*10}|{'-'*10}|{'-'*14}|{'-'*12}|{'-'*17}|{'-'*17}|")
+    print(f"| {'Dataset':<16} | {'ResNet':<8} | {'M-Net':<8} | {'P-Net':<8} | {'Ours(Fusion)':<12} | {'DeLong p-val':<12} | {'Params(Base/Ours)':<18} | {'Inf.Time':<18} |")
+    print(f"|{'-'*18}|{'-'*10}|{'-'*10}|{'-'*10}|{'-'*14}|{'-'*14}|{'-'*20}|{'-'*20}|")
     for r in results:
         flag = "✅" if r['Ours'] >= max(r['M'], r['P']) else "⚠️"
-        print(f"| {r['Dataset']:<16} | {r['Base']:.4f}   | {r['M']:.4f}   | {r['P']:.4f}   | **{r['Ours']:.4f}** {flag:<2} | {r['PVal']:<10} | {r['Params']:<15} | {r['Time']:<15} |")
+        print(f"| {r['Dataset']:<16} | {r['Base']:.4f}   | {r['M']:.4f}   | {r['P']:.4f}   | **{r['Ours']:.4f}** {flag:<2} | {r['PVal']:<12} | {r['Params']:<18} | {r['Time']:<18} |")
     print("★"*115)
-    print("\n🎉 挂机结束！主程序已经全部跑通，数据精准对齐！")
+    print("\n🎉 实验全部结束！权威权重已写盘，计算得到的 DeLong P 值可直接更至论文 Table I！")
 
 if __name__ == "__main__":
     main()
