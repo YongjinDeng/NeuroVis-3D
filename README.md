@@ -31,8 +31,8 @@ This will train and evaluate NeuroVis-3D on four MedMNIST-3D benchmarks (Nodule,
 
 | Dataset | ResNet AUC | NeuroVis-3D AUC | DeLong p |
 |---------|------------|-----------------|----------|
-| NoduleMNIST3D | 0.8693 | 0.8984 | 0.044 |
-| VesselMNIST3D | 0.8489 | 0.8918 | 0.029 |
+| NoduleMNIST3D | 0.8538 | 0.8979 | 0.031 |
+| VesselMNIST3D | 0.8117 | 0.9410 | <0.001 |
 
 ## Citation
 
