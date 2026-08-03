@@ -20,7 +20,8 @@ warnings.filterwarnings('ignore')
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['figure.dpi'] = 300
 
-RESULTS_DIR = r'D:\0临床科研\生物视觉图网络用于分类\NeuroRes_Results_Ultimate'
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RESULTS_DIR = os.path.join(BASE_DIR, 'NeuroRes_Results_Ultimate')
 WEIGHTS_DIR = os.path.join(RESULTS_DIR, 'weights')
 FIGURES_DIR = os.path.join(RESULTS_DIR, 'paper_figures')
 os.makedirs(FIGURES_DIR, exist_ok=True)
@@ -77,7 +78,7 @@ class NeuroVis3D_Evidential(nn.Module):
 
 class MedMNIST3DDataset(torch.utils.data.Dataset):
     def __init__(self, data_class, split='test'):
-        self.dataset = data_class(split=split, download=False)
+        self.dataset = data_class(split=split, download=True)
     def __len__(self): return len(self.dataset)
     def __getitem__(self, idx):
         img, label = self.dataset[idx]
