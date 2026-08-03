@@ -22,9 +22,10 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==================== 目录与全局配置 ====================
-RESULTS_DIR = r'D:\0临床科研\生物视觉图网络用于分类\NeuroRes_Results_Ultimate'
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RESULTS_DIR = os.path.join(BASE_DIR, 'NeuroRes_Results_Ultimate')
 WEIGHTS_DIR = os.path.join(RESULTS_DIR, 'weights')
-FIGURES_DIR = os.path.join(RESULTS_DIR, 'figures')
+FIGURES_DIR = os.path.join(RESULTS_DIR, 'paper_figures')
 os.makedirs(WEIGHTS_DIR, exist_ok=True)
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
