@@ -29,9 +29,11 @@ def set_seed(seed=42):
 
 set_seed(42)
 
-DATA_DIR = r'D:\0临床科研\生物视觉图网络用于分类\external_data'
-RESULTS_DIR = r'D:\0临床科研\生物视觉图网络用于分类\NeuroRes_Results_Ultimate'
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, 'external_data')
+RESULTS_DIR = os.path.join(BASE_DIR, 'NeuroRes_Results_Ultimate')
 WEIGHTS_DIR = os.path.join(RESULTS_DIR, 'weights')
+os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
 # ==========================================
 # 1. 核心网络架构 (与预训练时绝对一致)
